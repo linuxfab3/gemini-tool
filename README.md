@@ -1,6 +1,6 @@
 # gemini-tool
 
-- **作者 GitHub**: [linuxfab](https://github.com/linuxfab)
+- **作者 GitHub**: [linuxfab3](https://github.com/linuxfab3)
 - **最後更新時間**: 2026-02-28
 
 ## 專案介紹
