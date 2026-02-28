@@ -1,7 +1,13 @@
 import os
 import sys
 import google.generativeai as genai
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from typing import List, Dict
+
+# OAuth 範圍 (Scopes)
+SCOPES = ['https://www.googleapis.com/auth/generative-language.retriever']
 
 # 定義系統指令
 SYSTEM_INSTRUCTION = """
@@ -18,41 +24,63 @@ class ProjectAnalyzer:
     def __init__(self, root_dir: str = "."):
         self.root_dir = root_dir
         self.ignore_dirs = {'.git', '.venv', '__pycache__', '.pytest_cache', '.gemini'}
-        self.ignore_files = {'uv.lock', '.python-version', '.gitignore'}
+        self.ignore_files = {'uv.lock', '.python-version', '.gitignore', 'token.json', 'client_secret.json'}
 
     def get_project_context(self) -> str:
         """收集專案結構與檔案內容"""
         context = ["這是一個專案的原始碼上下文：\n"]
-        
         for root, dirs, files in os.walk(self.root_dir):
-            # 過濾掉不需要的目錄
             dirs[:] = [d for d in dirs if d not in self.ignore_dirs]
-            
             for file in files:
                 if file in self.ignore_files:
                     continue
-                
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, self.root_dir)
-                
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                         context.append(f"--- FILE: {relative_path} ---\n{content}\n")
                 except Exception:
-                    # 跳過二進位檔案或讀取失敗的檔案
                     continue
-        
         return "\n".join(context)
 
-def setup_gemini():
-    """初始化 Gemini API"""
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        print("錯誤：請先設置環境變數 GOOGLE_API_KEY")
-        sys.exit(1)
+def authenticate():
+    """處理 OAuth2 認證流程"""
+    creds = None
+    # 檢查是否已有儲存的 Token
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     
-    genai.configure(api_key=api_key)
+    # 如果沒有有效憑證，則發起登入
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists('client_secret.json'):
+                print("錯誤：找不到 client_secret.json 檔案。")
+                print("請從 Google Cloud Console 下載 OAuth 2.0 用戶端 ID 檔案並重新命名為 client_secret.json。")
+                sys.exit(1)
+            flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        # 儲存憑證以供下次使用
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    
+    return creds
+
+def setup_gemini():
+    """初始化 Gemini API (優先使用 OAuth)"""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    
+    if api_key:
+        print("偵測到 GOOGLE_API_KEY，將使用 API Key 進行認證。")
+        genai.configure(api_key=api_key)
+    else:
+        print("未偵測到 API Key，嘗試使用 Google 帳號認證...")
+        creds = authenticate()
+        genai.configure(credentials=creds)
+    
     return genai.GenerativeModel(
         model_name='gemini-1.5-flash',
         system_instruction=SYSTEM_INSTRUCTION
@@ -60,9 +88,7 @@ def setup_gemini():
 
 def chat_with_llm(model: genai.GenerativeModel, prompt: str, context: str = ""):
     """與 LLM 對話，並注入專案上下文"""
-    # 將上下文與使用者的問題結合
     full_prompt = f"{context}\n\n使用者問題：{prompt}" if context else prompt
-    
     try:
         response = model.generate_content(full_prompt, stream=True)
         print("\nGemini: ", end="", flush=True)
@@ -77,7 +103,6 @@ def main():
     model = setup_gemini()
     analyzer = ProjectAnalyzer()
     
-    # 預先載入專案上下文
     print("正在掃描專案檔案以建立 RAG 上下文...")
     project_context = analyzer.get_project_context()
     print(f"掃描完成。")
@@ -86,7 +111,7 @@ def main():
         user_input = " ".join(sys.argv[1:])
         chat_with_llm(model, user_input, project_context)
     else:
-        print("--- Gemini 專案分析模式 (輸入 'quit' 退出) ---")
+        print("--- Gemini 專案分析模式 (已登入) ---")
         while True:
             try:
                 user_input = input("You: ")
